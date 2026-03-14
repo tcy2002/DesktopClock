@@ -188,6 +188,63 @@ def set_tool_window(hwnd):
     )
 
 
+def get_desktop_host_window():
+    progman = win32gui.FindWindow("Progman", None)
+    if progman:
+        try:
+            # Ensure WorkerW/SHELLDLL_DefView hierarchy is initialized.
+            win32gui.SendMessageTimeout(progman, 0x052C, 0, 0, win32con.SMTO_NORMAL, 1000)
+        except win32gui.error:
+            pass
+
+    found = {
+        "defview": None,
+        "workerw": None,
+    }
+
+    def enum_windows_callback(hwnd, _):
+        defview = win32gui.FindWindowEx(hwnd, 0, "SHELLDLL_DefView", None)
+        if defview:
+            found["defview"] = defview
+            found["workerw"] = hwnd
+        return True
+
+    win32gui.EnumWindows(enum_windows_callback, None)
+
+    if found["defview"]:
+        return found["defview"]
+    if found["workerw"]:
+        return found["workerw"]
+    if progman:
+        return progman
+    return win32gui.GetDesktopWindow()
+
+
+def attach_to_desktop_layer(hwnd):
+    host = get_desktop_host_window()
+
+    style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+    style |= win32con.WS_CHILD
+    style &= ~win32con.WS_POPUP
+    win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
+
+    win32gui.SetParent(hwnd, host)
+    win32gui.SetWindowPos(
+        hwnd,
+        win32con.HWND_TOP,
+        0,
+        0,
+        0,
+        0,
+        win32con.SWP_NOMOVE
+        | win32con.SWP_NOSIZE
+        | win32con.SWP_NOACTIVATE
+        | win32con.SWP_SHOWWINDOW
+        | win32con.SWP_FRAMECHANGED,
+    )
+    return host
+
+
 """
 Set the desktop wallpaper to a BMP image. This function modifies the Windows registry to set the wallpaper style 
 and tile options, and then uses the SystemParametersInfo function to apply the new wallpaper. The BMP image is 
@@ -252,10 +309,26 @@ currently active window has the title 'clock', and if so, it moves the clock win
 on the screen dimensions (xx, yy) with specific offsets to place it near the bottom-right corner.
 """
 def fix_window(xx, yy):
-    title1 = win32gui.GetWindowText(win32gui.GetForegroundWindow())
-    title = win32gui.GetWindowText(win32gui.GetActiveWindow())
-    if (title == 'clock' or title1 == 'clock'):
-        win32gui.SetWindowPos(pygame.display.get_wm_info()['window'], 1, xx - 380, yy - 430, 0, 0, 0x0001)
+    hwnd = pygame.display.get_wm_info()['window']
+    target_x = xx - 380
+    target_y = yy - 430
+
+    parent = win32gui.GetParent(hwnd)
+    if parent:
+        try:
+            target_x, target_y = win32gui.ScreenToClient(parent, (target_x, target_y))
+        except win32gui.error:
+            pass
+
+    win32gui.SetWindowPos(
+        hwnd,
+        win32con.HWND_TOP,
+        target_x,
+        target_y,
+        0,
+        0,
+        win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW,
+    )
 
 
 """
@@ -342,23 +415,7 @@ def draw_hands(surface, now):
     return now.hour
 
 
-"""
-Build a visible background surface by scaling the original background image to fit the screen dimensions and then
-blitting the appropriate portion of the scaled image onto a new surface. The function calculates the new dimensions 
-of the background image based on the screen size, scales the image accordingly, and then determines the portion of
-the scaled image to blit onto the visible background surface to ensure that the clock is positioned correctly on the
-desktop.
-"""
-def build_visible_background(background, xx, yy):
-    x, y = background.get_size()
-    nx = int(x * yy / y) if x / y > xx / yy else xx
-    ny = int(y * xx / x) if x / y < xx / yy else yy
-    scaled_background = pygame.transform.scale(background, (nx, ny))
-    visible_background = pygame.Surface((350, 350))
-    vx = int(nx / 2 + xx / 2 - 380)
-    vy = int(ny / 2 + yy / 2 - 430)
-    visible_background.blit(scaled_background, (-1-vx, -1-vy+(ny - yy) / 6))
-    return visible_background
+
     
 
 def main():
@@ -374,11 +431,11 @@ def main():
     pygame.display.set_caption('clock')
     hwnd = pygame.display.get_wm_info()['window']
     set_tool_window(hwnd)
+    attach_to_desktop_layer(hwnd)
 
     background = pygame.image.load(path).convert()
     xx = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
     yy = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
-    visible_background = build_visible_background(background, xx, yy)
     now = datetime.datetime.now()
     h_cpy = now.hour
 
@@ -400,7 +457,7 @@ def main():
         tray = TrayIcon('Desktop Clock', action_queue)
         tray.start()
 
-    screen.blit(visible_background, (0, 0))
+    screen.fill((0, 0, 0, 0))
     draw_hands(screen, now)
     pygame.display.update()
 
@@ -413,7 +470,7 @@ def main():
         while not action_queue.empty():
             action = action_queue.get_nowait()
             if action == 'show':
-                win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+                win32gui.ShowWindow(hwnd, win32con.SW_SHOWNOACTIVATE)
                 needs_fix_window = True
             elif action == 'hide':
                 win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
@@ -444,22 +501,18 @@ def main():
             current_yy = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
             if current_xx != xx or current_yy != yy:
                 xx, yy = current_xx, current_yy
-                visible_background = build_visible_background(background, xx, yy)
             fix_window(xx, yy)
             needs_fix_window = False
 
         now = datetime.datetime.now()
 
-        screen.blit(visible_background, (0, 0))
-
+        screen.fill((0, 0, 0, 0))
         draw_clock_face(screen)
         hour = draw_hands(screen, now)
 
         if h_cpy != hour:
             f = choose_wallpaper(jpgs)
             path = os.path.join(p, f)
-            background = pygame.image.load(path).convert()
-            visible_background = build_visible_background(background, xx, yy)
             set_wallpaper(path)
         h_cpy = hour
 
