@@ -413,9 +413,6 @@ def draw_hands(surface, now):
     draw_hand(surface, origin, h, 75, 12, lemon_yellow)
 
     return now.hour
-
-
-
     
 
 def main():
